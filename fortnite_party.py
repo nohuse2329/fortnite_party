@@ -3,7 +3,6 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
 import asyncio
-import random
 import os
 from aiohttp import web
 
@@ -14,52 +13,26 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------------------------------------------------
-# ⚙️ サーバー内で動的に編集可能な選択肢リスト
+# ⚙️ モードリスト（初期設定・サーバー内で管理・並び替え可能）
 # ---------------------------------------------------------
+DEFAULT_MODES = [
+    "ガチパイレーツショップ周回",
+    "リロード",
+    "リロードランク",
+    "バトロワ",
+    "バトロワランク",
+    "クリエマップ",
+    "大会"
+]
+
 DYNAMIC_CONFIG = {
-    "games": ["フォートナイト", "Fortnite ZeroBuild", "その他"],
-    "modes": [
-        "🔥 ランク上げ（本気）",
-        "☕ エンジョイ / 雑談",
-        "🎯 クリエイティブ / 練習",
-        "🏆 大会 / スクエイム",
-        "👑 Victory Crown稼ぎ"
-    ],
-    "capacity": ["1人", "2人", "3人", "無制限"],
-    "ranks": [
-        "制限なし",
-        "ブロンズ以上",
-        "シルバー以上",
-        "ゴールド以上",
-        "プラチナ以上",
-        "ダイヤモンド以上",
-        "エリート以上",
-        "チャンピオン以上",
-        "アンリアル"
-    ]
+    "modes": DEFAULT_MODES.copy()
 }
 
-USER_RANKS = ["制限なし", "ブロンズ", "シルバー", "ゴールド", "プラチナ", "ダイヤモンド", "エリート", "チャンピオン", "アンリアル"]
-
-RANK_HIERARCHY = {
-    "制限なし": 0, "ブロンズ": 1, "シルバー": 2, "ゴールド": 3,
-    "プラチナ": 4, "ダイヤモンド": 5, "エリート": 6, "チャンピオン": 7, "アンリアル": 8,
-    "ブロンズ以上": 1, "シルバー以上": 2, "ゴールド以上": 3,
-    "プラチナ以上": 4, "ダイヤモンド以上": 5, "エリート以上": 6, "チャンピオン以上": 7, "アンリアル以上": 8
-}
-
-user_link_data = {}
 parties = {}
 party_counter = 0
-giveaways = {}
-giveaway_counter = 0
 invite_cooldowns = {}
 log_channel_id = None
-
-def get_user_data(user_id):
-    if user_id not in user_link_data:
-        user_link_data[user_id] = {"rank": "制限なし"}
-    return user_link_data[user_id]
 
 async def send_log(guild: discord.Guild, embed: discord.Embed):
     global log_channel_id
@@ -89,60 +62,58 @@ async def on_member_remove(member: discord.Member):
     )
     await send_log(member.guild, embed)
 
-# --- ランク設定 ---
-class SetRankSelectView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        options = [discord.SelectOption(label=r, value=r) for r in USER_RANKS]
-        self.add_item(SetRankSelect(options))
-
-class SetRankSelect(discord.ui.Select):
-    def __init__(self, options):
-        super().__init__(placeholder="自分の最高ランクを選択...", options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        selected_rank = self.values[0]
-        u_data = get_user_data(interaction.user.id)
-        u_data["rank"] = selected_rank
-        await interaction.response.send_message(f"✅ ランクを **{selected_rank}** に設定しました！", ephemeral=True)
-
-# --- PT作成フロー（すべて選択式） ---
+# --- PT作成用モーダル＆ビュー ---
 class CreatePartyWizardView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.game = DYNAMIC_CONFIG["games"][0]
-        self.mode = DYNAMIC_CONFIG["modes"][0]
-        self.req_rank = DYNAMIC_CONFIG["ranks"][0]
-        self.cap = DYNAMIC_CONFIG["capacity"][0]
+        self.selected_mode = DYNAMIC_CONFIG["modes"][0] if DYNAMIC_CONFIG["modes"] else "バトロワ"
+        self.selected_cap = 3  # デフォルト募集枠（3人追加募集＝4人PT）
 
-        self.add_item(GameSelect([discord.SelectOption(label=g, value=g) for g in DYNAMIC_CONFIG["games"][:25]]))
-        self.add_item(ModeSelect([discord.SelectOption(label=m, value=m) for m in DYNAMIC_CONFIG["modes"][:25]]))
-        self.add_item(RankReqSelect([discord.SelectOption(label=r, value=r) for r in DYNAMIC_CONFIG["ranks"][:25]]))
-        self.add_item(CapSelect([discord.SelectOption(label=c, value=c) for c in DYNAMIC_CONFIG["capacity"][:25]]))
+        if DYNAMIC_CONFIG["modes"]:
+            self.add_item(ModeSelect([discord.SelectOption(label=m, value=m) for m in DYNAMIC_CONFIG["modes"][:25]]))
+        self.add_item(CapSelect())
 
-    @discord.ui.button(label="🚀 この内容で募集を開始する", style=discord.ButtonStyle.success, row=4)
-    async def submit_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="📝 パーティー名を入力して作成", style=discord.ButtonStyle.success, row=2)
+    async def open_modal_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(PartyNameModal(self.selected_mode, self.selected_cap))
+
+class ModeSelect(discord.ui.Select):
+    def __init__(self, options): super().__init__(placeholder="① モードを選択...", options=options, row=0)
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_mode = self.values[0]
+        await interaction.response.defer()
+
+class CapSelect(discord.ui.Select):
+    def __init__(self):
+        options = [discord.SelectOption(label=f"募集: {i}名", value=str(i)) for i in range(1, 11)]
+        super().__init__(placeholder="② 募集人数を選択 (1〜10名)...", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_cap = int(self.values[0])
+        await interaction.response.defer()
+
+class PartyNameModal(discord.ui.Modal, title='パーティー名入力'):
+    def __init__(self, mode, cap):
+        super().__init__()
+        self.mode = mode
+        self.cap = cap
+
+    party_title = discord.ui.TextInput(
+        label='パーティー名（目的など自由に入力）',
+        placeholder='例: @1 周回できる人！ / 楽しくやろう！',
+        max_length=50,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
         global party_counter
         guild = interaction.guild
         user = interaction.user
 
-        u_data = get_user_data(user.id)
-        user_rank = u_data["rank"]
-        if RANK_HIERARCHY[user_rank] < RANK_HIERARCHY[self.req_rank]:
-            return await interaction.response.send_message(
-                f"❌ あなたの登録ランク（{user_rank}）より高い条件（{self.req_rank}）は設定できません。",
-                ephemeral=True
-            )
-
         party_counter += 1
         p_id = party_counter
 
-        # 募集人数の数値化
-        max_mem = 4
-        if "1人" in self.cap: max_mem = 2
-        elif "2人" in self.cap: max_mem = 3
-        elif "3人" in self.cap: max_mem = 4
-        elif "無制限" in self.cap: max_mem = 99
+        max_members = self.cap + 1  # 募集人数 + リーダー
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False, view_channel=False, connect=False),
@@ -152,52 +123,35 @@ class CreatePartyWizardView(discord.ui.View):
 
         category = interaction.channel.category
         text_channel = await guild.create_text_channel(name=f"pt-{p_id}-{user.name}", category=category, overwrites=overwrites)
-        voice_channel = await guild.create_voice_channel(name=f"🔊 PT-{p_id} ({user.name})", category=category, user_limit=max_mem if max_mem < 99 else 0, overwrites=overwrites)
+        voice_channel = await guild.create_voice_channel(name=f"🔊 PT-{p_id} ({user.name})", category=category, user_limit=max_members, overwrites=overwrites)
 
         parties[p_id] = {
-            "id": p_id, "leader": user, "game": self.game, "mode": self.mode,
-            "min_rank": self.req_rank, "capacity_str": self.cap, "max_members": max_mem,
-            "members": [user], "text_channel": text_channel, "voice_channel": voice_channel,
-            "created_at": datetime.datetime.now(datetime.timezone.utc), "notified": False
+            "id": p_id,
+            "title": self.party_title.value,
+            "leader": user,
+            "mode": self.mode,
+            "req_cap": self.cap,
+            "max_members": max_members,
+            "members": [user],
+            "text_channel": text_channel,
+            "voice_channel": voice_channel,
+            "created_at": datetime.datetime.now(datetime.timezone.utc),
+            "notified": False
         }
 
         embed = discord.Embed(
-            title=f"🎮 【{self.game}】パーティー作成完了 [ID: {p_id}]",
-            description=f"### 📢 募集目的: **{self.mode}**\n\n"
-                        f"👤 **募集者:** {user.mention} (ランク: `{user_rank}`)\n"
-                        f"🎯 **条件・ランク:** `{self.req_rank}`\n"
-                        f"👥 **募集人数:** `{self.cap}` (現在: 1/{max_mem if max_mem < 99 else '∞'})\n"
+            title=f"🎮 【{self.party_title.value}】",
+            description=f"# 📢 **{self.party_title.value}**\n\n"
+                        f"🎮 **モード:** `{self.mode}`\n"
+                        f"👤 **募集者:** {user.mention}\n"
+                        f"👥 **募集人数:** `{self.cap}名` (現在: 1/{max_members}名)\n"
                         f"🔊 **専用VC:** {voice_channel.mention}\n",
             color=discord.Color.green()
         )
-        await text_channel.send(content=f"{user.mention} パーティーを作成しました！", embed=embed, view=PartyControlView(p_id))
+        await text_channel.send(content=f"{user.mention} パーティーが作成されました！", embed=embed, view=PartyControlView(p_id))
         await interaction.response.send_message(f"✅ パーティーを作成しました！ {text_channel.mention}", ephemeral=True)
 
-class GameSelect(discord.ui.Select):
-    def __init__(self, options): super().__init__(placeholder="① ゲーム名を選択...", options=options, row=0)
-    async def callback(self, interaction: discord.Interaction):
-        self.view.game = self.values[0]
-        await interaction.response.defer()
-
-class ModeSelect(discord.ui.Select):
-    def __init__(self, options): super().__init__(placeholder="② 募集目的（モード）を選択...", options=options, row=1)
-    async def callback(self, interaction: discord.Interaction):
-        self.view.mode = self.values[0]
-        await interaction.response.defer()
-
-class RankReqSelect(discord.ui.Select):
-    def __init__(self, options): super().__init__(placeholder="③ 参加条件ランクを選択...", options=options, row=2)
-    async def callback(self, interaction: discord.Interaction):
-        self.view.req_rank = self.values[0]
-        await interaction.response.defer()
-
-class CapSelect(discord.ui.Select):
-    def __init__(self, options): super().__init__(placeholder="④ 募集枠数を選択...", options=options, row=3)
-    async def callback(self, interaction: discord.Interaction):
-        self.view.cap = self.values[0]
-        await interaction.response.defer()
-
-# --- PT管理操作（管理者削除対応） ---
+# --- PT内での操作ボタン ---
 class PartyControlView(discord.ui.View):
     def __init__(self, party_id):
         super().__init__(timeout=None)
@@ -245,7 +199,7 @@ class PartyControlView(discord.ui.View):
         await p["text_channel"].send(f"🚪 {user.mention} が脱退しました。")
         await interaction.response.send_message("脱退しました。", ephemeral=True)
 
-    @discord.ui.button(label="💥 解散（管理者/リーダー権限）", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="💥 解散（管理者/リーダー）", style=discord.ButtonStyle.danger)
     async def delete_party(self, interaction: discord.Interaction, button: discord.ui.Button):
         p = parties.get(self.party_id)
         is_admin = interaction.user.guild_permissions.administrator
@@ -276,7 +230,7 @@ class AllMemberInviteSelect(discord.ui.Select):
         view = PartyInviteAcceptView(self.party_id, target_member.id)
         embed = discord.Embed(
             title="✉️ パーティー招待",
-            description=f"{target_member.mention} さん\n{interaction.user.mention} から **{p['game']} ({p['mode']})** への招待が届きました。",
+            description=f"{target_member.mention} さん\n{interaction.user.mention} から **「{p['title']}」** への招待が届きました。",
             color=discord.Color.gold()
         )
         await p["text_channel"].send(content=f"{target_member.mention}", embed=embed, view=view)
@@ -300,7 +254,7 @@ class PartyInviteAcceptView(discord.ui.View):
         perm = discord.PermissionOverwrite(read_messages=True, view_channel=True, send_messages=True, connect=True, speak=True)
         await p["text_channel"].set_permissions(interaction.user, overwrite=perm)
         await p["voice_channel"].set_permissions(interaction.user, overwrite=perm)
-        
+
         for c in self.children: c.disabled = True
         await interaction.message.edit(view=self)
         await p["text_channel"].send(f"🎉 {interaction.user.mention} が参加しました！")
@@ -327,7 +281,7 @@ class MainPanelView(discord.ui.View):
     @discord.ui.button(label="🎮 PT作成", style=discord.ButtonStyle.green, custom_id="fn_create")
     async def create_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            "📋 募集設定を選択してください：",
+            "📋 モードと募集人数を選択してください：",
             view=CreatePartyWizardView(),
             ephemeral=True
         )
@@ -349,21 +303,20 @@ class MainPanelView(discord.ui.View):
         for p_id, p in list(parties.items()):
             is_full = len(p["members"]) >= p["max_members"]
             status_tag = "🔴 **[締切 / 満員]**" if is_full else "🟢 **[募集中]**"
-            max_str = p['max_members'] if p['max_members'] < 99 else '∞'
 
-            field_title = f"{status_tag} ID:{p_id} | 🎮 {p['game']}"
+            field_title = f"{status_tag} ID:{p_id} | 📢 {p['title']}"
             field_value = (
-                f"### 📢 目的: **{p['mode']}**\n"
+                f"# **{p['title']}**\n"
+                f"🎮 **モード:** `{p['mode']}`\n"
                 f"👤 **募集者:** {p['leader'].mention}\n"
-                f"🎯 **条件:** `{p['min_rank']}`\n"
-                f"👥 **人数:** `{len(p['members'])} / {max_str}名` ({p['capacity_str']})\n"
+                f"👥 **募集枠:** `{len(p['members'])} / {p['max_members']}名` (あと{p['max_members'] - len(p['members'])}名)\n"
                 f"----------------------------------------"
             )
             embed.add_field(name=field_title, value=field_value, inline=False)
 
             if not is_full:
                 join_options.append(discord.SelectOption(
-                    label=f"ID:{p_id} | {p['game']} ({p['mode']})",
+                    label=f"ID:{p_id} | {p['title']} ({p['mode']})",
                     value=str(p_id)
                 ))
 
@@ -374,17 +327,6 @@ class MainPanelView(discord.ui.View):
         else:
             await interaction.response.send_message(embed=embed, content="※現在参加可能な（満員でない）募集はありません。", ephemeral=True)
 
-    @discord.ui.button(label="⚙️ ランク設定", style=discord.ButtonStyle.secondary, custom_id="fn_rank_set")
-    async def rank_set_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("自分のフォートナイトランクを選択してください：", view=SetRankSelectView(), ephemeral=True)
-
-    @discord.ui.button(label="👤 マイステータス", style=discord.ButtonStyle.secondary, custom_id="fn_mystats")
-    async def mystats_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        u_data = get_user_data(interaction.user.id)
-        embed = discord.Embed(title="👤 マイステータス", color=discord.Color.blue())
-        embed.add_field(name="登録ランク", value=u_data["rank"], inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
 class PartyJoinSelect(discord.ui.Select):
     def __init__(self, options):
         super().__init__(placeholder="👉 参加したいパーティーを選択...", options=options)
@@ -394,58 +336,104 @@ class PartyJoinSelect(discord.ui.Select):
         user = interaction.user
         if not p: return
 
-        u_data = get_user_data(user.id)
-        if RANK_HIERARCHY[u_data["rank"]] < RANK_HIERARCHY[p["min_rank"]]:
-            return await interaction.response.send_message(f"❌ ランク条件を満たしていません (必要: {p['min_rank']} / あなた: {u_data['rank']})。", ephemeral=True)
-
         if user in p["members"]: return await interaction.response.send_message("すでに追加されています。", ephemeral=True)
 
         p["members"].append(user)
         perm = discord.PermissionOverwrite(read_messages=True, view_channel=True, send_messages=True, connect=True, speak=True)
         await p["text_channel"].set_permissions(user, overwrite=perm)
         await p["voice_channel"].set_permissions(user, overwrite=perm)
-        
+
         await p["text_channel"].send(f"🎉 {user.mention} が参加しました！")
         await interaction.response.send_message(f"参加しました！ {p['text_channel'].mention}", ephemeral=True)
 
-# --- 管理者コマンド（選択肢の追加・削除＆管理機能） ---
-@bot.tree.command(name="add_game_option", description="[管理者] PT作成時のゲーム選択肢を追加します")
-@app_commands.checks.has_permissions(administrator=True)
-async def add_game_option(interaction: discord.Interaction, name: str):
-    if name not in DYNAMIC_CONFIG["games"]:
-        DYNAMIC_CONFIG["games"].append(name)
-        await interaction.response.send_message(f"✅ ゲーム選択肢に **{name}** を追加しました！", ephemeral=True)
-    else:
-        await interaction.response.send_message("既に存在する選択肢です。", ephemeral=True)
+# ---------------------------------------------------------
+# 🛠️ 管理者機能：文字入力なしでモード並び替え・削除・追加
+# ---------------------------------------------------------
+class ManageModesView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
 
-@bot.tree.command(name="remove_game_option", description="[管理者] PT作成時のゲーム選択肢を削除します")
-@app_commands.checks.has_permissions(administrator=True)
-async def remove_game_option(interaction: discord.Interaction, name: str):
-    if name in DYNAMIC_CONFIG["games"]:
-        DYNAMIC_CONFIG["games"].remove(name)
-        await interaction.response.send_message(f"🗑️ ゲーム選択肢から **{name}** を削除しました。", ephemeral=True)
-    else:
-        await interaction.response.send_message("指定された選択肢が見つかりません。", ephemeral=True)
+    @discord.ui.button(label="➕ モード新規追加", style=discord.ButtonStyle.green, row=0)
+    async def add_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddModeModal())
 
-@bot.tree.command(name="add_mode_option", description="[管理者] PT作成時の募集目的（モード）選択肢を追加します")
-@app_commands.checks.has_permissions(administrator=True)
-async def add_mode_option(interaction: discord.Interaction, name: str):
-    if name not in DYNAMIC_CONFIG["modes"]:
-        DYNAMIC_CONFIG["modes"].append(name)
-        await interaction.response.send_message(f"✅ 募集目的選択肢に **{name}** を追加しました！", ephemeral=True)
-    else:
-        await interaction.response.send_message("既に存在する選択肢です。", ephemeral=True)
+    @discord.ui.button(label="🗑️ モード一括削除", style=discord.ButtonStyle.danger, row=0)
+    async def remove_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not DYNAMIC_CONFIG["modes"]:
+            return await interaction.response.send_message("削除できるモードがありません。", ephemeral=True)
+        view = discord.ui.View()
+        view.add_item(RemoveModeSelect())
+        await interaction.response.send_message("削除したいモードをチェック（選択）してください：", view=view, ephemeral=True)
 
-@bot.tree.command(name="remove_mode_option", description="[管理者] PT作成時の募集目的（モード）選択肢を削除します")
-@app_commands.checks.has_permissions(administrator=True)
-async def remove_mode_option(interaction: discord.Interaction, name: str):
-    if name in DYNAMIC_CONFIG["modes"]:
-        DYNAMIC_CONFIG["modes"].remove(name)
-        await interaction.response.send_message(f"🗑️ 募集目的選択肢から **{name}** を削除しました。", ephemeral=True)
-    else:
-        await interaction.response.send_message("指定された選択肢が見つかりません。", ephemeral=True)
+    @discord.ui.button(label="🔄 モード一括並び替え", style=discord.ButtonStyle.primary, row=0)
+    async def reorder_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not DYNAMIC_CONFIG["modes"]:
+            return await interaction.response.send_message("並び替えるモードがありません。", ephemeral=True)
+        current_str = "\n".join([f"{i+1}. {m}" for i, m in enumerate(DYNAMIC_CONFIG["modes"])])
+        await interaction.response.send_modal(ReorderModesModal(current_str))
 
-@bot.tree.command(name="setup_log_channel", description="[管理者] サーバー入退室通知の送信先チャンネルを設定します")
+    @discord.ui.button(label="↺ 初期状態に戻す", style=discord.ButtonStyle.secondary, row=0)
+    async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        DYNAMIC_CONFIG["modes"] = DEFAULT_MODES.copy()
+        await interaction.response.send_message("✅ モードリストを初期状態（ご指定の7種）に戻しました！", ephemeral=True)
+
+class AddModeModal(discord.ui.Modal, title='モード追加'):
+    mode_name = discord.ui.TextInput(label='追加するモード名', placeholder='例: アリーナ', max_length=30)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        val = self.mode_name.value.strip()
+        if val and val not in DYNAMIC_CONFIG["modes"]:
+            DYNAMIC_CONFIG["modes"].append(val)
+            await interaction.response.send_message(f"✅ **{val}** をモード一覧に追加しました！", ephemeral=True)
+        else:
+            await interaction.response.send_message("既にあるか、無効な名前です。", ephemeral=True)
+
+class RemoveModeSelect(discord.ui.Select):
+    def __init__(self):
+        options = [discord.SelectOption(label=m, value=m) for m in DYNAMIC_CONFIG["modes"][:25]]
+        super().__init__(placeholder="削除するモードを選択（複数選択可）...", options=options, min_values=1, max_values=len(options))
+
+    async def callback(self, interaction: discord.Interaction):
+        for val in self.values:
+            if val in DYNAMIC_CONFIG["modes"]:
+                DYNAMIC_CONFIG["modes"].remove(val)
+        await interaction.response.send_message(f"🗑️ 選択したモード ({', '.join(self.values)}) を削除しました！", ephemeral=True)
+
+class ReorderModesModal(discord.ui.Modal, title='モード並び替え'):
+    def __init__(self, current_str):
+        super().__init__()
+        self.text_input = discord.ui.TextInput(
+            label='現在の並び（行を入れ替えて保存してください）',
+            style=discord.TextStyle.paragraph,
+            default=current_str,
+            required=True
+        )
+        self.add_item(self.text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lines = [line.strip() for line in self.text_input.value.split('\n') if line.strip()]
+        new_modes = []
+        for line in lines:
+            # 「1. 」などの先頭番号がついている場合を除外して名前を取得
+            cleaned = line.split('.', 1)[-1].strip() if '.' in line and line.split('.', 1)[0].isdigit() else line
+            if cleaned:
+                new_modes.append(cleaned)
+
+        DYNAMIC_CONFIG["modes"] = new_modes
+        await interaction.response.send_message("✅ モードの並び替えを保存しました！", ephemeral=True)
+
+@bot.tree.command(name="manage_modes", description="[管理者] モードの追加・並び替え・一括削除メニューを開く")
+@app_commands.checks.has_permissions(administrator=True)
+async def manage_modes(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛠️ モード管理メニュー",
+        description="打ち込みなしでボタンやドラッグで管理できます：\n\n" +
+                    "\n".join([f"• **{m}**" for m in DYNAMIC_CONFIG["modes"]]),
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=ManageModesView(), ephemeral=True)
+
+@bot.tree.command(name="setup_log_channel", description="[管理者] サーバー入退室通知の送信先チャンネルを設定")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_log_channel(interaction: discord.Interaction):
     global log_channel_id
@@ -457,11 +445,9 @@ async def setup_log_channel(interaction: discord.Interaction):
 async def setup_panel(interaction: discord.Interaction):
     embed = discord.Embed(
         title="⚔️ パーティー募集＆総合管理パネル",
-        description="以下のボタンからパーティーの作成・確認・参加ができます！\n\n"
-                    "🎮 **PT作成:** 選択肢から選ぶだけで素早く募集開始\n"
-                    "📋 **PT一覧・参加:** 現在募集中のパーティーを確認・参加\n"
-                    "⚙️ **ランク設定:** 自分の最高ランクを登録\n"
-                    "👤 **マイステータス:** 登録情報の確認",
+        description="下のボタンからパーティーの作成・一覧確認・参加ができます！\n\n"
+                    "🎮 **PT作成:** モードと人数を選び、パーティー名を入力して募集開始\n"
+                    "📋 **PT一覧・参加:** 現在募集中のパーティーを確認・参加",
         color=discord.Color.dark_purple()
     )
     await interaction.channel.send(embed=embed, view=MainPanelView())
