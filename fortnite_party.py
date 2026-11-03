@@ -6,12 +6,12 @@ import asyncio
 import random
 import aiohttp
 import os
-from aiohttp import web  # ← Webサーバー用に追加
+from aiohttp import web
 
 # --- Botの初期設定 ---
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True # サーバー入退室監視・メンバー検索に必須
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------------------------------------------------
@@ -78,20 +78,14 @@ async def send_log(guild: discord.Guild, embed: discord.Embed):
 
 async def fetch_fortnite_rank(epic_name: str) -> str:
     url = f"https://fortnite-api.com/v2/stats/br/v2?name={epic_name}"
-    
-    # 環境変数から安全にAPIキーを読み込む
     api_key = os.getenv("FORTNITE_API_KEY")
-    headers = {
-        "Authorization": api_key if api_key else ""
-    }
+    headers = {"Authorization": api_key if api_key else ""}
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, timeout=5) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    # 必要に応じてAPIのレスポンスから実際のランクを取り出す処理
-                    return "ダイヤモンド" # 仮置き
+                    return "ダイヤモンド"
                 else:
                     return None
         except Exception:
@@ -647,8 +641,9 @@ async def check_party_expiration():
             try:
                 await p["text_channel"].delete()
                 await p["voice_channel"].delete()
-            except: pass
-                parties.pop(p_id, None)
+            except:
+                pass
+            parties.pop(p_id, None)
 
 # --- RenderのWeb Service用：簡易Webサーバー起動処理 ---
 async def handle(request):
@@ -669,7 +664,6 @@ async def main():
         print("エラー: DISCORD_BOT_TOKEN が環境変数に設定されていません。")
         return
     
-    # WebサーバーとDiscord Botを同時に非同期で動かす
     await start_web_server()
     await bot.start(token)
 
