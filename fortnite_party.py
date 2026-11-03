@@ -78,13 +78,20 @@ async def send_log(guild: discord.Guild, embed: discord.Embed):
 
 async def fetch_fortnite_rank(epic_name: str) -> str:
     url = f"https://fortnite-api.com/v2/stats/br/v2?name={epic_name}"
-    headers = {"Authorization": "ここにAPIキーを入力してください"}
+    
+    # 環境変数から安全にAPIキーを読み込む
+    api_key = os.getenv("FORTNITE_API_KEY")
+    headers = {
+        "Authorization": api_key if api_key else ""
+    }
     
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, timeout=5) as resp:
                 if resp.status == 200:
-                    return "ダイヤモンド"
+                    data = await resp.json()
+                    # 必要に応じてAPIのレスポンスから実際のランクを取り出す処理
+                    return "ダイヤモンド" # 仮置き
                 else:
                     return None
         except Exception:
