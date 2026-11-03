@@ -5,7 +5,8 @@ import datetime
 import asyncio
 import random
 import aiohttp
-import os  # ← 環境変数読み込み用に追加
+import os
+from aiohttp import web  # ← Webサーバー用に追加
 
 # --- Botの初期設定 ---
 intents = discord.Intents.default()
@@ -51,7 +52,7 @@ party_counter = 0
 giveaways = {}
 giveaway_counter = 0
 
-# 招待クールダウン管理データ ( { (party_id, target_user_id): timestamp } )
+# 招待クールダウン管理データ
 invite_cooldowns = {}
 
 # ログ送信先チャンネルID
@@ -65,7 +66,6 @@ def get_user_data(user_id):
         }
     return user_link_data[user_id]
 
-# ログ送信共通関数（サーバー入退通知など）
 async def send_log(guild: discord.Guild, embed: discord.Embed):
     global log_channel_id
     if log_channel_id:
@@ -76,7 +76,6 @@ async def send_log(guild: discord.Guild, embed: discord.Embed):
             except Exception:
                 pass
 
-# --- Fortnite APIを使ってランクを自動取得する関数 ---
 async def fetch_fortnite_rank(epic_name: str) -> str:
     url = f"https://fortnite-api.com/v2/stats/br/v2?name={epic_name}"
     headers = {"Authorization": "ここにAPIキーを入力してください"}
@@ -85,15 +84,12 @@ async def fetch_fortnite_rank(epic_name: str) -> str:
         try:
             async with session.get(url, headers=headers, timeout=5) as resp:
                 if resp.status == 200:
-                    return "ダイヤモンド" # 取得成功時の仮置き
+                    return "ダイヤモンド"
                 else:
                     return None
         except Exception:
             return None
 
-# ---------------------------------------------------------
-# 1. サーバー参加・退出の通知イベント
-# ---------------------------------------------------------
 @bot.event
 async def on_member_join(member: discord.Member):
     embed = discord.Embed(
@@ -115,9 +111,6 @@ async def on_member_remove(member: discord.Member):
     )
     await send_log(member.guild, embed)
 
-# ---------------------------------------------------------
-# 2. Epicアカウント連携 Modal
-# ---------------------------------------------------------
 class LinkEpicModal(discord.ui.Modal, title='Epic Games アカウント連携'):
     epic_id = discord.ui.TextInput(label='Epicアカウント名', placeholder='例: FortniteGamer123')
 
@@ -146,9 +139,6 @@ class LinkEpicModal(discord.ui.Modal, title='Epic Games アカウント連携'):
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-# ---------------------------------------------------------
-# 3. パーティー作成（選択メニュー＆詳細設定）
-# ---------------------------------------------------------
 class CreatePartySelectView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -437,9 +427,6 @@ class MemberSelect(discord.ui.Select):
             await interaction.response.send_message(f"👑 {new_l.mention} にリーダー権限を譲渡しました！", ephemeral=True)
             await p["text_channel"].send(f"👑 {new_l.mention} が新しいリーダーになりました！")
 
-# ---------------------------------------------------------
-# 4. 無料配布（抽選） ＆ サポートチケット
-# ---------------------------------------------------------
 class GiveawayView(discord.ui.View):
     def __init__(self, giveaway_id):
         super().__init__(timeout=None)
@@ -483,9 +470,6 @@ async def create_support_ticket(guild: discord.Guild, winner: discord.Member, re
     await ticket_ch.send(content=f"{winner.mention}", embed=embed)
     return ticket_ch
 
-# ---------------------------------------------------------
-# 5. メインパネル
-# ---------------------------------------------------------
 class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -576,7 +560,6 @@ class PartyJoinSelect(discord.ui.Select):
         await p["text_channel"].send(f"🎉 {user.mention} が参加しました！ ({len(p['members'])}/4名)")
         await interaction.response.send_message(f"参加しました！ {p['text_channel'].mention}", ephemeral=True)
 
-# --- スラッシュコマンド群（管理者用） ---
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -644,7 +627,6 @@ async def setup_panel(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=MainPanelView())
     await interaction.response.send_message("設置完了。", ephemeral=True)
 
-# 48時間/50時間チェックタスク
 @tasks.loop(minutes=5)
 async def check_party_expiration():
     now = datetime.datetime.utcnow()
@@ -659,12 +641,30 @@ async def check_party_expiration():
                 await p["text_channel"].delete()
                 await p["voice_channel"].delete()
             except: pass
-            parties.pop(p_id, None)
+                parties.pop(p_id, None)
 
-# --- Renderなどの環境変数からトークンを安全に読み込んで起動 ---
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-if not TOKEN:
-    # ローカル（PC）で直接テスト実行する場合用のフォールバック
-    TOKEN = "ここにローカルテスト用のトークンを直接書いても動きます"
+# --- RenderのWeb Service用：簡易Webサーバー起動処理 ---
+async def handle(request):
+    return web.Response(text="Bot is running!")
 
-bot.run(TOKEN)
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+
+async def main():
+    token = os.getenv("DISCORD_BOT_TOKEN")
+    if not token:
+        print("エラー: DISCORD_BOT_TOKEN が環境変数に設定されていません。")
+        return
+    
+    # WebサーバーとDiscord Botを同時に非同期で動かす
+    await start_web_server()
+    await bot.start(token)
+
+if __name__ == "__main__":
+    asyncio.run(main())
