@@ -4,7 +4,6 @@ from discord import app_commands
 import datetime
 import asyncio
 import random
-import aiohttp
 import os
 from aiohttp import web
 
@@ -27,6 +26,18 @@ GAME_MODES = [
 
 # ランク選択肢と順序
 RANK_OPTIONS = [
+    "制限なし",
+    "ブロンズ",
+    "シルバー",
+    "ゴールド",
+    "プラチナ",
+    "ダイヤモンド",
+    "エリート",
+    "チャンピオン",
+    "アンリアル"
+]
+
+RANK_REQUIREMENT_OPTIONS = [
     "制限なし",
     "ブロンズ以上",
     "シルバー以上",
@@ -61,7 +72,6 @@ log_channel_id = None
 def get_user_data(user_id):
     if user_id not in user_link_data:
         user_link_data[user_id] = {
-            "epic_id": "未連携",
             "rank": "制限なし"
         }
     return user_link_data[user_id]
@@ -76,28 +86,13 @@ async def send_log(guild: discord.Guild, embed: discord.Embed):
             except Exception:
                 pass
 
-async def fetch_fortnite_rank(epic_name: str) -> str:
-    url = f"https://fortnite-api.com/v2/stats/br/v2?name={epic_name}"
-    api_key = os.getenv("FORTNITE_API_KEY")
-    headers = {"Authorization": api_key if api_key else ""}
-    
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, headers=headers, timeout=5) as resp:
-                if resp.status == 200:
-                    return "ダイヤモンド"
-                else:
-                    return None
-        except Exception:
-            return None
-
 @bot.event
 async def on_member_join(member: discord.Member):
     embed = discord.Embed(
         title="📥 メンバー参加",
         description=f"{member.mention} (`{member.name}`) がサーバーに参加しました！",
         color=discord.Color.green(),
-        timestamp=discord.utils.utcnow()
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
     embed.add_field(name="アカウント作成日", value=discord.utils.format_dt(member.created_at, style="R"), inline=True)
     await send_log(member.guild, embed)
@@ -108,37 +103,28 @@ async def on_member_remove(member: discord.Member):
         title="📤 メンバー退出",
         description=f"{member.mention} (`{member.name}`) がサーバーから退出しました。",
         color=discord.Color.red(),
-        timestamp=discord.utils.utcnow()
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
     await send_log(member.guild, embed)
 
-class LinkEpicModal(discord.ui.Modal, title='Epic Games アカウント連携'):
-    epic_id = discord.ui.TextInput(label='Epicアカウント名', placeholder='例: FortniteGamer123')
+class SetRankSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        options = [discord.SelectOption(label=r, value=r) for r in RANK_OPTIONS]
+        self.add_item(SetRankSelect(options))
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        user = interaction.user
-        epic_name = self.epic_id.value.strip()
+class SetRankSelect(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="あなたの最高ランクを選択してください...", options=options)
 
-        fetched_rank = await fetch_fortnite_rank(epic_name)
+    async def callback(self, interaction: discord.Interaction):
+        selected_rank = self.values[0]
+        u_data = get_user_data(interaction.user.id)
+        u_data["rank"] = selected_rank
 
-        if not fetched_rank:
-            return await interaction.followup.send(
-                "❌ Epicアカウントが見つからないか、戦績が非公開になっています。\n"
-                "フォートナイトのゲーム内設定で「キャリアリーダーボードに表示」をONにしてください。",
-                ephemeral=True
-            )
-
-        u_data = get_user_data(user.id)
-        u_data["epic_id"] = epic_name
-        u_data["rank"] = fetched_rank
-
-        embed = discord.Embed(title="🔗 アカウント連携完了 (自動取得)", color=discord.Color.green())
-        embed.add_field(name="Epic ID", value=epic_name, inline=False)
-        embed.add_field(name="自動取得された最高ランク", value=fetched_rank, inline=False)
-        embed.set_footer(text="※この情報はあなただけに公開されています。")
-
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed = discord.Embed(title="⚙️ ランク設定完了", color=discord.Color.green())
+        embed.add_field(name="設定されたランク", value=selected_rank, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class CreatePartySelectView(discord.ui.View):
     def __init__(self):
@@ -150,7 +136,7 @@ class CreatePartySelectView(discord.ui.View):
         mode_options = [discord.SelectOption(label=m, value=m) for m in GAME_MODES]
         self.add_item(ModeSelect(mode_options))
 
-        rank_options = [discord.SelectOption(label=r, value=r) for r in RANK_OPTIONS]
+        rank_options = [discord.SelectOption(label=r, value=r) for r in RANK_REQUIREMENT_OPTIONS]
         self.add_item(RankSelect(rank_options))
 
         privacy_options = [
@@ -209,12 +195,9 @@ class PartyDetailModal(discord.ui.Modal, title='パーティー詳細設定'):
         user = interaction.user
 
         u_data = get_user_data(user.id)
-        if u_data["epic_id"] == "未連携":
-            return await interaction.response.send_message("❌ パネルの「🔗 Epic連携」ボタンを押してアカウント連携を行ってください！", ephemeral=True)
-
         user_rank = u_data["rank"]
         if RANK_HIERARCHY[user_rank] < RANK_HIERARCHY[self.min_rank]:
-            return await interaction.response.send_message(f"❌ あなた自身のランク（{user_rank}）より高い参加条件（{self.min_rank}）は設定できません！", ephemeral=True)
+            return await interaction.response.send_message(f"❌ あなた自身の登録ランク（{user_rank}）より高い参加条件（{self.min_rank}）は設定できません！パネルの「⚙️ ランク設定」で変更してください。", ephemeral=True)
 
         party_counter += 1
         p_id = party_counter
@@ -234,7 +217,7 @@ class PartyDetailModal(discord.ui.Modal, title='パーティー詳細設定'):
             "min_rank": self.min_rank, "privacy": self.privacy,
             "conditions": self.conditions.value or "なし", "hashtags": self.hashtags.value or "#フォートナイト",
             "members": [user], "text_channel": text_channel, "voice_channel": voice_channel,
-            "created_at": discord.utils.utcnow(), "notified": False 
+            "created_at": datetime.datetime.now(datetime.timezone.utc), "notified": False 
         }
 
         privacy_icon = "🌐 公開" if self.privacy == "公開募集" else "🔒 招待限定"
@@ -343,7 +326,7 @@ class AllMemberInviteSelect(discord.ui.Select):
         if not target_member:
             return await interaction.response.send_message("メンバーが見つかりませんでした。", ephemeral=True)
 
-        now = datetime.datetime.utcnow().timestamp()
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
         key = (self.party_id, target_id)
         last_invited = invite_cooldowns.get(key, 0)
         
@@ -390,10 +373,6 @@ class PartyInviteAcceptView(discord.ui.View):
 
         if user in p["members"]:
             return await interaction.response.send_message("既にパーティーに参加しています。", ephemeral=True)
-
-        u_data = get_user_data(user.id)
-        if u_data["epic_id"] == "未連携":
-            return await interaction.response.send_message("❌ パネルの「🔗 Epic連携」ボタンを押して先にアカウント連携を行ってください！", ephemeral=True)
 
         p["members"].append(user)
 
@@ -515,17 +494,20 @@ class MainPanelView(discord.ui.View):
         else:
             await interaction.response.send_message(embed=embed, content="満員でない公開PTはありません。", ephemeral=True)
 
-    @discord.ui.button(label="🔗 Epic連携", style=discord.ButtonStyle.secondary, custom_id="fn_link")
-    async def link_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(LinkEpicModal())
+    @discord.ui.button(label="⚙️ ランク設定", style=discord.ButtonStyle.secondary, custom_id="fn_rank_set")
+    async def rank_set_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "自分のフォートナイトランクを選択してください：",
+            view=SetRankSelectView(),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="👤 マイステータス", style=discord.ButtonStyle.secondary, custom_id="fn_mystats")
     async def mystats_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         u_data = get_user_data(interaction.user.id)
         embed = discord.Embed(title="👤 マイステータス", color=discord.Color.blue())
-        embed.add_field(name="Epic ID", value=u_data["epic_id"], inline=False)
         embed.add_field(name="登録ランク", value=u_data["rank"], inline=False)
-        embed.set_footer(text="※PT作成や参加にはEpic連携が必要です。")
+        embed.set_footer(text="※ランク変更は「⚙️ ランク設定」ボタンから行えます。")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class PartyJoinSelect(discord.ui.Select):
@@ -538,11 +520,9 @@ class PartyJoinSelect(discord.ui.Select):
         if not p: return
 
         u_data = get_user_data(user.id)
-        if u_data["epic_id"] == "未連携":
-            return await interaction.response.send_message("❌ 先に「🔗 Epic連携」ボタンを押して連携してください。", ephemeral=True)
 
         if RANK_HIERARCHY[u_data["rank"]] < RANK_HIERARCHY[p["min_rank"]]:
-            return await interaction.response.send_message(f"❌ ランク条件を満たしていません (必要: {p['min_rank']})。", ephemeral=True)
+            return await interaction.response.send_message(f"❌ ランク条件を満たしていません (必要: {p['min_rank']} / あなた: {u_data['rank']})。", ephemeral=True)
 
         if user in p["members"]: return await interaction.response.send_message("参加済みです。", ephemeral=True)
 
@@ -605,7 +585,7 @@ async def reroll_giveaway(interaction: discord.Interaction, giveaway_id: int):
         if chosen not in winners:
             winners.append(chosen)
 
-    await interaction.response.send_message(f"🎉 抽選完了！ 当選者をチケットへ案内しています...", ephemeral=True)
+    await interaction.response.send_message("🎉 抽選完了！ 当選者をチケットへ案内しています...", ephemeral=True)
 
     for w_id in winners:
         member = interaction.guild.get_member(w_id)
@@ -621,8 +601,8 @@ async def setup_panel(interaction: discord.Interaction):
         description="各機能は以下のボタンを押すだけで利用できます！\n\n"
                     "🎮 **PT作成:** パーティー募集を開始します（公開 / 招待限定が選択可）\n"
                     "📋 **PT一覧・参加:** 現在募集中の公開パーティーを確認・参加します\n"
-                    "🔗 **Epic連携:** Epic IDを入力して最新ランクを自動取得します\n"
-                    "👤 **マイステータス:** 自分の連携状況やランクを確認します",
+                    "⚙️ **ランク設定:** 自分の最高ランクを手動で選択・更新します\n"
+                    "👤 **マイステータス:** 自分の登録ランクを確認します",
         color=discord.Color.dark_purple()
     )
     await interaction.channel.send(embed=embed, view=MainPanelView())
@@ -630,9 +610,9 @@ async def setup_panel(interaction: discord.Interaction):
 
 @tasks.loop(minutes=5)
 async def check_party_expiration():
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(datetime.timezone.utc)
     for p_id, p in list(parties.items()):
-        elapsed = now - p["created_at"].replace(tzinfo=None)
+        elapsed = now - p["created_at"]
         if elapsed >= datetime.timedelta(hours=48) and not p["notified"]:
             p["notified"] = True
             try: await p["text_channel"].send("⚠️ 48時間経過。2時間後に自動削除されます。")
